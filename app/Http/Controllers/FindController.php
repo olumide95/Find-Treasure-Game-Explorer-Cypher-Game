@@ -193,9 +193,14 @@ class FindController extends Controller
 
             //check the header 
             $array_header = $this->decodeHeader($response_header);  //disassemble the header  
-        
+            
+            // continue calling endpoint until it responds
+            if(!preg_match('/5[0-9][0-9]/', $response_code)){
 
-            return [$response_code,$response_body,$array_header];               
+                return $this->CallAPI($url);
+            }
+
+            return [$response_code,$response_body,$array_header];    
 
         
     }
