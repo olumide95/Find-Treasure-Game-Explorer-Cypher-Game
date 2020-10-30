@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 use App\Path;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 
 class FindController extends Controller
 {
@@ -31,48 +32,38 @@ class FindController extends Controller
             if($seen_path && count($paths) >= 1){
                 continue;
             }
-            
-            
-            [$response_code,$response,$header]  = $this->CallAPI($path);
+            $response  = $this->CallAPI($path);
             
             //if request did not encounter a server error
-            if(!preg_match('/5[0-9][0-9]/', $response_code)){
+            if(!$response->failed()){
 
-                    while($response_code === 429){
+                   
+                    if($response->status() == 302 || $response->status() == 208){
 
-                        $sleep_time = ($header["X-RateLimit-Reset"]-time())%60;
+                        $this->CallAPIAudience($path.'/audience-submissions');
+
+                    };
                     
-                        if($sleep_time > 0){
-                            sleep($sleep_time);
-                        }
+                    $seen_path = Path::where('path',$path)->first();
 
-                        [$response_code,$response,$header] = $this->CallAPI($path);
-
+                    if(!$seen_path){
+                        Path::create(['path'=>$path]);
                     }
 
-                    if($response_code == 302 || $response_code == 208 || $response_code == 200){
-                            
-                        $seen_path = Path::where('path',$path)->first();
-                        if(!$seen_path){
-                            Path::create(['path'=>$path]);
-                        }
+                    $response = $response->json(); 
+                
+                    $new_paths =  $response['paths'];
+                    $encryption = $response['encryption'];
+
+                    $decrypted_paths = $this->decryptPaths($encryption,$new_paths);
                     
-                        if(is_object(json_decode($response))){
-                            
-                            $new_paths =  json_decode($response)->paths;
-                            $encryption = json_decode($response)->encryption;
+                    //if starting node, put new paths into cache (For futher exporing in new/another application instance)
+                    if(count($paths) == 0){
 
-                            $new_paths = $this->decryptPaths($encryption,$new_paths);
-                            
-                            //if starting node, put new paths into cache (For futher exporing in new/another application instance)
-                            if(count($paths) == 0){
-                                Cache::put('back',$new_paths);
-                            }
-
-                            $paths = array_merge($paths,$new_paths);
-                        }
-                        
+                        Cache::put('back',$decrypted_paths); 
                     }
+
+                    $paths = array_merge($paths,$decrypted_paths);
             }
             else{
                 //put item back into paths array
@@ -111,46 +102,39 @@ class FindController extends Controller
             }
             
             
-            [$response_code,$response,$header]  = $this->CallAPI($path);
+            $response  = $this->CallAPI($path);
             
             //if request did not encounter a server error
-            if(!preg_match('/5[0-9][0-9]/', $response_code)){
+            if(!$response->failed()){
 
-                    while($response_code === 429){
+                   
+                    if($response->status() == 302 || $response->status() == 208){
 
-                        $sleep_time = ($header["X-RateLimit-Reset"]-time())%60;
+                        $this->CallAPIAudience($path.'/audience-submissions');
+
+                    };
                     
-                        if($sleep_time > 0){
-                            sleep($sleep_time);
-                        }
+                    $seen_path = Path::where('path',$path)->first();
 
-                        [$response_code,$response,$header] = $this->CallAPI($path);
-
+                    if(!$seen_path){
+                        Path::create(['path'=>$path]);
                     }
 
-                    if($response_code == 302 || $response_code == 208 || $response_code == 200){
-                            
-                        $seen_path = Path::where('path',$path)->first();
-                        if(!$seen_path){
-                            Path::create(['path'=>$path]);
-                        }
+                    $response = $response->json(); 
+                
+                    $new_paths =  $response['paths'];
+                    $encryption = $response['encryption'];
+
+                    $decrypted_paths = $this->decryptPaths($encryption,$new_paths);
                     
-                        if(is_object(json_decode($response))){
-                            $new_paths =  json_decode($response)->paths;
-                            $encryption = json_decode($response)->encryption;
+                    //if starting node, put new paths into cache (For futher exporing in new/another application instance)
+                    if(count($paths) == 0){
 
-                            $new_paths = $this->decryptPaths($encryption,$new_paths);
-                            
-                            //if starting node, put new paths into cache (For futher exporing in new/another application instance)
-                            if(count($paths) == 0){
-
-                                Cache::put('front',$new_paths); 
-                            }
-
-                            $paths = array_merge($paths,$new_paths);
-                        }
-                        
+                        Cache::put('front',$decrypted_paths); 
                     }
+
+                    $paths = array_merge($paths,$decrypted_paths);
+                    
             }
             else{
 
@@ -163,64 +147,55 @@ class FindController extends Controller
           return 'Done Exploring!';
     }
 
-
     function CallAPI($url)
     {
-            $curl = curl_init();
- 
-            curl_setopt($curl, CURLOPT_HTTPHEADER, array(
-                'gomoney: '.env('phone'),
-                'Authorization: Bearer '.env('token')
-            ));
+            $response = Http::retry(3600, 900)->withHeaders([
+                'accountId' => env('id'),
+                'Authorization' =>'Bearer '.env('token')
+            ])->get(env('API').$url);
 
-            // Optional Authentication:
-            curl_setopt($curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
-
-            curl_setopt($curl, CURLOPT_URL, env('API').$url);
-            curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-            curl_setopt($curl, CURLOPT_HEADER, true);
-
-            $result = curl_exec($curl);
-            
-            $response_info = curl_getinfo($curl); //store info related to results  
-            $response_code = $response_info['http_code']; //HTTP status code for communication result  
-            $response_header_size = $response_info['header_size']; //header size for communication result  
-            curl_close($curl); //close communication 
-
-            //confirm the details of the header info because within the response header info is also included rate limit info,   
-            $response_header = substr($result, 0, $response_header_size);  // clip the header  
-            $response_body = substr($result, $response_header_size);  //clip the body  
-
-            //check the header 
-            $array_header = $this->decodeHeader($response_header);  //disassemble the header  
-            
-            // continue calling endpoint until it responds
-            if(preg_match('/5[0-9][0-9]/', $response_code)){
-
-                return $this->CallAPI($url);
-            }
-
-            return [$response_code,$response_body,$array_header];    
-
+           return $response;    
         
+    }
+    
+
+    public function CallAPIAudience($url)
+    {
+       $response = Http::post(env('API').$url,[
+                'accountId' => env('id'),
+                'accountType' => 'buycoins'
+            ]);
+    
     }
 
 
 
   public function decryptPaths($encryption,$paths_to_decrypt)
   {
-
+    
     $paths = [];
 
     foreach ($paths_to_decrypt as $path_to_decrypt){
 
-        $data = $path_to_decrypt->cipherId;
+        $data = $path_to_decrypt['cipherId'];
 
-        for($i=0; $i < $path_to_decrypt->n; $i++){
+        if(Cache::get($data)){
 
-            $data = openssl_decrypt(hex2bin($data), $encryption->algorithm, $encryption->key, OPENSSL_RAW_DATA , substr($encryption->key,0,16));
+            $data  = Cache::get($data);
 
+        }else{
+
+            for($i=0; $i < $path_to_decrypt['n']; $i++){
+
+                $data = openssl_decrypt(hex2bin($data), $encryption['algorithm'], $encryption['key'], OPENSSL_RAW_DATA , substr($encryption['key'],0,16));
+
+            }
+
+            Cache::put($path_to_decrypt['cipherId'],$data);
+            
         }
+
+        
 
         $seen_path = Path::where('path',$data)->first();
         
